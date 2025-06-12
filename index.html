@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <title>力导向图 - 增强交互 + 搜索 + 控制按钮</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: sans-serif;
+        }
+        svg {
+            width: 100vw;
+            height: 100vh;
+            background-color: #f9f9f9;
+        }
+        .node circle {
+            stroke: white;
+            stroke-width: 2px;
+            cursor: pointer;
+        }
+        .node text {
+            font-size: 12px;
+            pointer-events: none;
+        }
+        .link {
+            stroke: #999;
+            stroke-width: 1.5px;
+        }
+        .control-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            background: rgba(255,255,255,0.9);
+            padding: 10px;
+            border-radius: 8px;
+        }
+        .search-box input {
+            width: 200px;
+            padding: 6px;
+            font-size: 14px;
+        }
+        .buttons button {
+            padding: 6px 10px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        /* 新增：节点详情样式 */
+        .node-detail {
+            position: absolute;
+            right: 20px;
+            top: 20px;
+            width: 200px;
+            padding: 10px;
+            background: rgba(255,255,255,0.9);
+            border-radius: 8px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<!-- 控制面板 -->
+<div class="control-panel">
+    <div class="search-box">
+        <input type="text" id="searchInput" placeholder="搜索节点..." />
+    </div>
+    <div class="buttons">
+        <button onclick="zoomIn()">放大 +</button>
+        <button onclick="zoomOut()">缩小 -</button>
+        <button onclick="resetZoom()">重置</button>
+        <!-- 新增：导出PNG/SVG按钮 -->
+        <button onclick="exportAs('png')">导出为PNG</button>
+        <button onclick="exportAs('svg')">导出为SVG</button>
+    </div>
+</div>
+
+<!-- 新增：节点详情面板 -->
+<div class="node-detail" id="nodeDetail">
+    <h3>节点详情</h3>
+    <p><strong>ID:</strong> <span id="detailId"></span></p>
+    <p><strong>标签:</strong> <span id="detailLabel"></span></p>
+    <p><strong>属性:</strong> <pre id="detailProps"></pre></p>
+</div>
+
+<svg></svg>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/save-svg-as-png@1.4.17/src/saveSvgAsPng.js"></script>
+<script>
+    const url = 'graph.json'; // JSON 文件路径
+    let nodeElements, linkElements, simulation, zoom, svg, g;
+
+    d3.json(url).then(data => {
+        // 解析 nodes 和 relationships
+        const nodes = data.nodes.map(n => ({
+            id: n.id,
+            label: n.labels[0],
+            text:n.properties.text,
+            properties: n.properties // 保留原始 properties 对象
+        }));
+        
+        const links = data.relationships.map(r => ({
+            source: r.startNode,
+            target: r.endNode,
+            type: r.type
+        }));
+
+        initGraph(nodes, links);
+    }).catch(err => {
+        console.error('加载 graph.json 出错:', err);
+    });
+
+    function initGraph(nodes, links) {
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        svg = d3.select("svg")
+            .attr("viewBox", [0, 0, width, height])
+            .attr("preserveAspectRatio", "xMidYMid meet");
+
+        g = svg.append("g");
+
+        zoom = d3.zoom()
+            .scaleExtent([0.1, 4])
+            .on("zoom", event => {
+                g.attr("transform", event.transform);
+            });
+
+        svg.call(zoom);
+
+        simulation = d3.forceSimulation(nodes)
+            .force("link", d3.forceLink(links).id(d => d.id).distance(150))
+            .force("charge", d3.forceManyBody().strength(-300))
+            .force("center", d3.forceCenter(width / 2, height / 2));
+
+        // 绘制连线
+        linkElements = g.append("g")
+            .attr("stroke", "#999")
+            .selectAll("line")
+            .data(links)
+            .join("line")
+            .attr("class", d => `link ${d.type.toLowerCase()}`);
+
+        // 绘制节点
+        nodeElements = g.append("g")
+            .attr("class", "nodes")
+            .selectAll("g")
+            .data(nodes, d => d.id)
+            .join("g")
+            .call(drag(simulation))
+            .on("click", (event, d) => {
+                focusOnNode(d);
+                showNodeDetail(d); // 显示节点详情
+            })
+            .on("dblclick", (event, d) => focusOnNode(d));
+
+        nodeElements.append("circle")
+            .attr("r", 20)
+            .attr("fill", d => d.label === "Title" ? "steelblue" : "lightgreen");
+
+        nodeElements.append("text")
+            .attr("dy", 4)
+            .attr("text-anchor", "middle")
+            .text(d => d.text || d.id);
+
+        simulation.on("tick", () => {
+            linkElements
+                .attr("x1", d => d.source.x)
+                .attr("y1", d => d.source.y)
+                .attr("x2", d => d.target.x)
+                .attr("y2", d => d.target.y);
+
+            nodeElements.attr("transform", d => `translate(${d.x},${d.y})`);
+        });
+
+        // 搜索功能
+        d3.select("#searchInput").on("input", function () {
+            const query = this.value.trim().toLowerCase();
+            if (!query) return clearHighlight();
+
+            const matched = nodes.find(n => (n.text || "").toLowerCase().includes(query));
+            if (matched) {
+                highlightNode(matched);
+                focusOnNode(matched);
+            } else {
+                clearHighlight();
+            }
+        });
+    }
+
+    function drag(simulation) {
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+
+        function dragended(event, d) {
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+
+        return d3.drag()
+            .on("start", dragstarted)
+            .on("drag", dragged)
+            .on("end", dragended);
+    }
+
+    // 高亮某个节点
+    function highlightNode(nodeData) {
+        nodeElements.select("circle")
+            .style("stroke", d => d === nodeData ? "red" : "white")
+            .style("stroke-width", d => d === nodeData ? 4 : 2);
+    }
+
+    function clearHighlight() {
+        nodeElements.select("circle")
+            .style("stroke", "white")
+            .style("stroke-width", 2);
+    }
+
+    // 居中并放大到指定节点
+    function focusOnNode(nodeData) {
+        const transform = d3.zoomTransform(svg.node());
+        const scale = 1.5;
+        const x = -nodeData.x * scale + window.innerWidth / 2;
+        const y = -nodeData.y * scale + window.innerHeight / 2;
+
+        svg.transition().duration(500)
+            .call(zoom.transform, d3.zoomIdentity.translate(x, y).scale(scale));
+    }
+
+    // 新增：显示节点详情函数
+    function showNodeDetail(nodeData) {
+        const detailDiv = document.getElementById('nodeDetail');
+        document.getElementById('detailId').innerText = nodeData.id;
+        document.getElementById('detailLabel').innerText = nodeData.label || '无';
+        document.getElementById('detailProps').innerText = JSON.stringify(nodeData.properties || {}, null, 2);
+        detailDiv.style.display = 'block';
+    }
+    
+
+    // 新增：隐藏节点详情函数（可选）
+    function hideNodeDetail() {
+        document.getElementById('nodeDetail').style.display = 'none';
+    }
+
+    // 新增：导出为PNG或SVG的函数
+    function exportAs(type) {
+        if (type === 'png') {
+            saveSvgAsPng(document.querySelector('svg'), 'graph.png', { scale: 2 });
+        } else if (type === 'svg') {
+            const serializer = new XMLSerializer();
+            let source = serializer.serializeToString(document.querySelector('svg'));
+            const blob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.download = 'graph.svg';
+            a.href = url;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+    }
+
+    // 控制按钮
+    window.zoomIn = function () {
+        svg.transition().duration(200).call(zoom.scaleBy, 1.4);
+    };
+
+    window.zoomOut = function () {
+        svg.transition().duration(200).call(zoom.scaleBy, 0.6);
+    };
+
+    window.resetZoom = function () {
+        svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
+    };
+</script>
+</body>
+</html>
