@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Neo4j Graph Visualization - Full Feature</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 10;
+            background: rgba(255,255,255,0.9);
+            padding: 6px;
+            border-radius: 4px;
+            box-shadow: 0 0 4px rgba(0,0,0,0.2);
+        }
+        #controls button, #searchInput {
+            margin-right: 5px;
+            padding: 4px 8px;
+            font-size: 12px;
+        }
+        .node circle {
+            stroke: #fff;
+            stroke-width: 1.5px;
+        }
+        .node text {
+            pointer-events: none;
+            font-size: 10px;
+        }
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+            stroke-width: 1.5px;
+            marker-end: url(#arrow);
+        }
+        .highlight {
+            stroke: red;
+            stroke-width: 3px;
+        }
+        #legend {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(255,255,255,0.9);
+            padding: 6px;
+            border-radius: 4px;
+            box-shadow: 0 0 4px rgba(0,0,0,0.2);
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            margin-right: 6px;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- 控制面板 -->
+<div id="controls">
+    <input type="text" id="searchInput" placeholder="搜索节点..." style="width:120px;">
+    <button onclick="zoomIn()">放大</button>
+    <button onclick="zoomOut()">缩小</button>
+    <button onclick="resetZoom()">重置视图</button>
+    <button onclick="exportPNG()">导出 PNG</button>
+    <button onclick="exportSVG()">导出 SVG</button>
+</div>
+
+<!-- 图例 -->
+<div id="legend"></div>
+
+<!-- SVG 图形容器 -->
+<svg id="graph" width="100%" height="100%"></svg>
+
+<script>
+    let selectedNode = null;
+    let currentTransform = d3.zoomIdentity;
+    let allNodes = [];
+    let colorScale;
+
+    // 加载 JSON 数据
+    d3.json('graph.json').then(function(graph) {
+        const svg = d3.select("#graph"),
+              width = window.innerWidth,
+              height = window.innerHeight;
+
+        // 设置 viewBox 和缩放支持
+        svg.attr("viewBox", [0, 0, width, height])
+           .attr("preserveAspectRatio", "xMidYMid meet");
+
+        // 初始化颜色比例尺
+        const labels = [...new Set(graph.nodes.map(d => d.labels[0]))];
+        colorScale = d3.scaleOrdinal(d3.schemeCategory10).domain(labels);
+
+        // 构建 links 数据结构
+        const links = graph.relationships.map(d => ({
+            source: d.startNode,
+            target: d.endNode,
+            type: d.type
+        }));
+
+        // 创建映射表
+        const nodeMap = {};
+        graph.nodes.forEach(n => nodeMap[n.id] = n);
+
+        // 创建力导向模拟器
+        const simulation = d3.forceSimulation(graph.nodes)
+            .force("link", d3.forceLink(links).id(d => d.id).distance(120))
+            .force("charge", d3.forceManyBody().strength(-400))
+            .force("center", d3.forceCenter(width / 2, height / 2));
+
+        // 添加箭头标记
+        svg.append("defs").selectAll("marker")
+            .data(["arrow"])
+            .enter().append("marker")
+            .attr("id", "arrow")
+            .attr("viewBox", "0 -5 10 10")
+            .attr("refX", 15)
+            .attr("refY", 0)
+            .attr("markerWidth", 6)
+            .attr("markerHeight", 6)
+            .attr("orient", "auto")
+            .append("path")
+            .attr("d", "M0,-5L10,0L0,5")
+            .attr("fill", "#999");
+
+        // 绘制连线
+        const link = svg.append("g")
+            .attr("class", "links")
+            .selectAll("line")
+            .data(links)
+            .enter().append("line")
+            .attr("class", "link");
+
+        // 绘制关系文字
+        const linkText = svg.append("g")
+            .selectAll("text")
+            .data(links)
+            .enter().append("text")
+            .attr("class", "link-text")
+            .text(d => d.type);
+
+        // 创建节点组
+        const node = svg.append("g")
+            .attr("class", "nodes")
+            .selectAll("g")
+            .data(graph.nodes)
+            .enter().append("g")
+            .on("click", (event, d) => {
+                highlightNode(d);
+            })
+            .call(d3.drag()
+                .on("start", dragstarted)
+                .on("drag", dragged)
+                .on("end", dragended))
+            .on("dblclick", (event, d) => {
+                d.fx = d.fx ? null : d.x;
+                d.fy = d.fy ? null : d.y;
+            });
+
+        // 节点图形
+        node.append("circle")
+            .attr("r", 15)
+            .attr("fill", d => colorScale(d.labels[0]));
+
+        node.append("text")
+            .attr("dx", 18)
+            .attr("dy", ".35em")
+            .text(d => d.properties.text);
+
+        allNodes = node.data();
+
+        // tick 更新图形位置
+        simulation.on("tick", () => {
+            link
+                .attr("x1", d => currentTransform.applyX(d.source.x))
+                .attr("y1", d => currentTransform.applyY(d.source.y))
+                .attr("x2", d => currentTransform.applyX(d.target.x))
+                .attr("y2", d => currentTransform.applyY(d.target.y));
+
+            linkText
+                .attr("x", d => currentTransform.applyX((d.source.x + d.target.x) / 2))
+                .attr("y", d => currentTransform.applyY((d.source.y + d.target.y) / 2));
+
+            node.attr("transform", d => 
+                `translate(${currentTransform.applyX(d.x)}, ${currentTransform.applyY(d.y)})`
+            );
+        });
+
+        // ===== 按钮控制 Start =====
+        
+        // 放大
+        window.zoomIn = function () {
+            currentTransform = currentTransform.scaleBy(1.2);
+            simulation.alphaTarget(0.01).restart(); // 触发一次模拟刷新
+            setTimeout(() => simulation.stop(), 0); // 马上停止，只刷新一次
+            updateGraph();
+        };
+         // 缩小
+        window.zoomOut = function () {
+            currentTransform = currentTransform.scaleBy(0.2);
+            simulation.alphaTarget(0.01).restart();
+            setTimeout(() => simulation.stop(), 0);
+            updateGraph();
+        };
+        
+        
+
+        // 重置视图
+        window.resetZoom = function () {
+            currentTransform = d3.zoomIdentity;
+            updateGraph();
+        };
+
+        // 应用当前变换
+        function updateGraph() {
+            link
+                .attr("x1", d => currentTransform.applyX(d.source.x))
+                .attr("y1", d => currentTransform.applyY(d.source.y))
+                .attr("x2", d => currentTransform.applyX(d.target.x))
+                .attr("y2", d => currentTransform.applyY(d.target.y));
+
+            linkText
+                .attr("x", d => currentTransform.applyX((d.source.x + d.target.x) / 2))
+                .attr("y", d => currentTransform.applyY((d.source.y + d.target.y) / 2));
+
+            node.attr("transform", d => 
+                `translate(${currentTransform.applyX(d.x)}, ${currentTransform.applyY(d.y)})`
+            );
+        }
+
+        // ===== 初始化自动居中并缩放 Start =====
+        function fitToView() {
+            const bbox = node.node().getBBox();
+            const dx = bbox.width;
+            const dy = bbox.height;
+            const scale = Math.max(0.1, Math.min(2, 0.9 / Math.max(dx / width, dy / height)));
+            const translate = [
+                width / 2 - scale * (bbox.x + dx / 2),
+                height / 2 - scale * (bbox.y + dy / 2)
+            ];
+
+            currentTransform = d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale);
+            updateGraph();
+        }
+
+        setTimeout(fitToView, 1000); // 等待布局稳定
+        // ===== 初始化自动居中并缩放 End =====
+
+        // ===== 高亮指定节点及其连接关系 Start =====
+        function highlightNode(d) {
+            selectedNode = d;
+
+            link.classed("highlight", l => l.source === d || l.target === d);
+            node.selectAll("circle")
+                .classed("highlight", nd => nd === d);
+        }
+        // ===== 高亮指定节点及其连接关系 End =====
+
+        // ===== 滚轮缩放 Start =====
+        svg.on("wheel", (event) => {
+            event.preventDefault();
+            const scaleStep = event.deltaY < 0 ? 1.1 : 0.9;
+            currentTransform = currentTransform.scaleBy(scaleStep);
+            updateGraph();
+        });
+        // ===== 滚轮缩放 End =====
+
+        // ===== 节点搜索功能优化：按下 Enter 键才触发搜索 Start =====
+        window.searchNode = function () {}; // dummy 函数用于绑定事件
+        document.getElementById("searchInput").addEventListener("keydown", function(event) {
+            if (event.key === "Enter") {
+                const keyword = this.value.toLowerCase();
+                node.selectAll("circle")
+                    .classed("highlight", d => d.properties.text.toLowerCase().includes(keyword));
+            }
+        });
+        // ===== 节点搜索功能优化 End =====
+
+        // ===== 图例 Start =====
+        const legend = d3.select("#legend");
+        labels.forEach(label => {
+            const item = legend.append("div").attr("class", "legend-item");
+            item.append("div")
+                .attr("class", "legend-color")
+                .style("background-color", colorScale(label));
+            item.append("span").text(label);
+        });
+        // ===== 图例 End =====
+
+        // ===== 导出功能 Start =====
+        window.exportPNG = function () {
+            const svgEl = document.getElementById("graph");
+            const canvas = document.createElement("canvas");
+            const rect = svgEl.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            const ctx = canvas.getContext("2d");
+            const data = new XMLSerializer().serializeToString(svgEl);
+            const DOMURL = window.URL || window.webkitURL || window;
+            const img = new Image();
+            const svgBlob = new Blob([data], {type: "image/svg+xml;charset=utf-8"});
+            const url = DOMURL.createObjectURL(svgBlob);
+            img.onload = () => {
+                ctx.drawImage(img, 0, 0);
+                DOMURL.revokeObjectURL(url);
+                const a = document.createElement("a");
+                a.href = canvas.toDataURL("image/png");
+                a.download = "graph.png";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            };
+            img.src = url;
+        };
+
+        window.exportSVG = function () {
+            const svgData = new XMLSerializer().serializeToString(document.getElementById("graph"));
+            const blob = new Blob([svgData], {type: "image/svg+xml"});
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "graph.svg";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        };
+        // ===== 导出功能 End =====
+
+        // ===== 窗口大小改变时更新 viewBox Start =====
+        window.addEventListener("resize", () => {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            svg.attr("viewBox", [0, 0, w, h]);
+        });
+        // ===== 窗口大小改变时更新 viewBox End =====
+
+        // 拖动逻辑
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+
+        function dragended(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+    });
+</script>
+</body>
+</html>
